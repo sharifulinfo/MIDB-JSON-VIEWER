@@ -5,7 +5,12 @@
   "description": "Pretty-prints JSON on midb.com/webhook_jobs (JSON Formatter-style) and shows *_at epochs as ms--readable date strings.",
   "content_scripts": [
     {
-      "matches": ["http://midb.com/*", "http://78.46.46.235/*"],
+      "matches": [
+        "http://midb.com/*",
+        "https://midb.com/*",
+        "http://78.46.46.235/*",
+        "https://78.46.46.235/*"
+      ],
       "js": ["content.js"],
       "css": ["styles.css"],
       "run_at": "document_start"

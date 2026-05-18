@@ -24,3 +24,12 @@
 .midb-ts-relative {
   color: #c9a227 !important;
 }
+
+/* Linked prospect_id values */
+a.midb-prospect-link {
+  color: #6cb6ff !important;
+  text-decoration: underline !important;
+}
+a.midb-prospect-link:hover {
+  color: #96ccff !important;
+}

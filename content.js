@@ -17,6 +17,9 @@
   // Raw token / alias → epoch ms (annotations built at inject time so relative stays fresh)
   const timestampMap = new Map();
 
+  // prospect display token → detail URL (see collectProspectLinks)
+  const prospectLinkMap = new Map();
+
   // ── Timestamp helpers ────────────────────────────────────────────────────
 
   function isLikelyMsEpoch(n) {
@@ -157,6 +160,46 @@
     }
   }
 
+  function resolveWorkspaceForProspect(prospectId, parentObj) {
+    const m = prospectId.match(/^(\d+)_/);
+    if (m) return m[1];
+    const w = parentObj?.workspace_id;
+    if (typeof w === "number" && Number.isFinite(w)) return String(Math.trunc(w));
+    if (typeof w === "string" && /^\d+$/.test(w.trim())) return w.trim();
+    return null;
+  }
+
+  function registerProspectLinkTokens(prospectId, href) {
+    const id = prospectId.trim();
+    prospectLinkMap.set(id, href);
+    prospectLinkMap.set(`"${id}"`, href);
+    prospectLinkMap.set(`'${id}'`, href);
+  }
+
+  function collectProspectLinks(obj) {
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => collectProspectLinks(item));
+    } else if (obj !== null && typeof obj === "object") {
+      for (const k of Object.keys(obj)) {
+        const v = obj[k];
+        if (
+          typeof k === "string" &&
+          k.toLowerCase() === "prospect_id" &&
+          typeof v === "string" &&
+          v.trim()
+        ) {
+          const id = v.trim();
+          const ws = resolveWorkspaceForProspect(id, obj);
+          if (ws) {
+            const href = `${location.protocol}//${location.host}/${ws}_prospects?_id=${encodeURIComponent(id)}`;
+            registerProspectLinkTokens(id, href);
+          }
+        }
+        collectProspectLinks(v);
+      }
+    }
+  }
+
   // ── DOM injection ────────────────────────────────────────────────────────
 
   function makeAnnotationSpan({ utc, bdt, relative }) {
@@ -199,7 +242,77 @@
     return null;
   }
 
+  /**
+   * One text node ends with comma: `"1779029700000,"` → digits node + comma (+ rest).
+   */
+  function splitTimestampDigitsFromCommaTail(node, ms) {
+    const parent = node.parentNode;
+    if (!parent) return node;
+
+    const full = node.textContent;
+    const m = full.match(/^(\s*)(\d{12,14})(\s*,)(\s*)([\s\S]*)$/);
+    if (!m) return node;
+
+    const digits = m[2];
+    if (!isLikelyMsEpoch(Number(digits)) || Number(digits) !== ms) return node;
+
+    const head = document.createTextNode(`${m[1]}${digits}`);
+    const comma = document.createTextNode(`${m[3]}${m[4]}`);
+    const rest = m[5] ? document.createTextNode(m[5]) : null;
+
+    parent.replaceChild(head, node);
+    parent.insertBefore(comma, head.nextSibling);
+    if (rest) parent.insertBefore(rest, comma.nextSibling);
+    return head;
+  }
+
+  /** Insert annotations between epoch digits and the JSON comma — handles one-node (`177...,`), text sibling `,`, or element sibling used as comma. */
+  function insertTimestampAnnotation(insertAfter, ms) {
+    const parent = insertAfter.parentNode;
+    if (!parent) return;
+
+    const span = makeAnnotationSpan(formatAnnotation(ms));
+    const ns = insertAfter.nextSibling;
+
+    function elementLooksLikeComma(el) {
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+      const t = el.textContent.replace(/\u00a0/g, " ").trim();
+      return t === "," || /^,\s*$/.test(t);
+    }
+
+    // JSON viewers sometimes wrap punctuation in an element sibling.
+    if (ns && elementLooksLikeComma(ns)) {
+      parent.insertBefore(span, ns);
+      return;
+    }
+
+    // Comma already isolated (e.g. after splitTimestampDigitsFromCommaTail): digits , …
+    if (ns && ns.nodeType === Node.TEXT_NODE && /^\s*,\s*$/.test(ns.textContent)) {
+      parent.insertBefore(span, ns);
+      return;
+    }
+
+    // Shared sibling: ", rest..." → digits | annot | comma | rest
+    if (ns && ns.nodeType === Node.TEXT_NODE) {
+      const m = ns.textContent.match(/^(\s*,)(\s*)([\s\S]*)$/);
+      if (m) {
+        const commaOnly = document.createTextNode(m[1] + m[2]);
+
+        parent.insertBefore(span, ns);
+        parent.insertBefore(commaOnly, ns);
+
+        if (m[3]) ns.textContent = m[3];
+        else parent.removeChild(ns);
+        return;
+      }
+    }
+
+    if (insertAfter.nextSibling) parent.insertBefore(span, insertAfter.nextSibling);
+    else parent.appendChild(span);
+  }
+
   function injectAnnotations() {
+    if (timestampMap.size === 0) return;
     // Skip if we've already annotated this render
     if (document.querySelector(".midb-ts-comment")) return;
 
@@ -212,6 +325,12 @@
           if (
             node.parentElement &&
             node.parentElement.classList.contains("midb-ts-comment")
+          ) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          if (
+            node.parentElement &&
+            node.parentElement.closest(".midb-prospect-link")
           ) {
             return NodeFilter.FILTER_REJECT;
           }
@@ -229,29 +348,74 @@
     }
 
     for (const { node, ms } of hits) {
+      const digitsNode = splitTimestampDigitsFromCommaTail(node, ms);
+      insertTimestampAnnotation(digitsNode, ms);
+    }
+  }
+
+  function hrefForProspectDomText(raw) {
+    const trimmed = String(raw || "").trim().replace(/,$/, "");
+    if (prospectLinkMap.has(trimmed)) return prospectLinkMap.get(trimmed);
+    const stripped = trimmed.replace(/^["']|["']$/g, "").trim().replace(/,$/, "");
+    if (prospectLinkMap.has(stripped)) return prospectLinkMap.get(stripped);
+    return null;
+  }
+
+  function injectProspectLinks() {
+    if (document.querySelector(".midb-prospect-link")) return;
+    if (prospectLinkMap.size === 0) return;
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const p = node.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        if (p.closest(".midb-ts-comment, .midb-prospect-link"))
+          return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    const hits = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      const href = hrefForProspectDomText(node.textContent);
+      if (href) hits.push({ node, href });
+    }
+
+    for (const { node, href } of hits) {
       const parent = node.parentNode;
       if (!parent) continue;
-      const span = makeAnnotationSpan(formatAnnotation(ms));
-      // Insert immediately after the text node
-      if (node.nextSibling) {
-        parent.insertBefore(span, node.nextSibling);
-      } else {
-        parent.appendChild(span);
-      }
+      const a = document.createElement("a");
+      a.className = "midb-prospect-link";
+      a.href = href;
+      a.textContent = node.textContent;
+      parent.replaceChild(a, node);
     }
   }
 
   // ── Raw JSON capture ─────────────────────────────────────────────────────
 
   function getRawText() {
-    const pre = document.querySelector("body > pre");
+    const pres = document.querySelectorAll("body > pre, body pre");
+    for (const pre of pres) {
+      if (
+        pre.childNodes.length === 1 &&
+        pre.firstChild &&
+        pre.firstChild.nodeType === Node.TEXT_NODE
+      ) {
+        const t = pre.textContent || "";
+        const tr = t.replace(/^\uFEFF/, "").trim();
+        if (tr.startsWith("{") || tr.startsWith("[")) return t;
+      }
+    }
+    const preFirst = document.querySelector("body > pre");
     if (
-      pre &&
-      pre.childNodes.length === 1 &&
-      pre.firstChild &&
-      pre.firstChild.nodeType === Node.TEXT_NODE
+      preFirst &&
+      preFirst.childNodes.length === 1 &&
+      preFirst.firstChild &&
+      preFirst.firstChild.nodeType === Node.TEXT_NODE
     ) {
-      return pre.textContent || "";
+      return preFirst.textContent || "";
     }
     return (document.body?.innerText || document.body?.textContent || "").trim();
   }
@@ -273,15 +437,14 @@
     if (!data) return;
 
     collectTimestamps(data);
-    if (timestampMap.size === 0) return;
+    collectProspectLinks(data);
+    if (timestampMap.size === 0 && prospectLinkMap.size === 0) return;
 
-    // Watch for JSON Viewer Pro (or any formatter) to finish rendering,
-    // then inject our annotations. Debounce so we only run once after
-    // the DOM settles.
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
+        injectProspectLinks();
         injectAnnotations();
       }, 400);
     });
@@ -291,7 +454,7 @@
       subtree: true,
     });
 
-    // Also try immediately in case the formatter already ran
+    injectProspectLinks();
     injectAnnotations();
   }
 
@@ -304,10 +467,20 @@
 
     // Body not ready yet — wait for it then capture before any formatter runs
     const bodyObserver = new MutationObserver(() => {
-      const pre = document.querySelector("body > pre");
-      if (pre) {
-        bodyObserver.disconnect();
-        setup(pre.textContent || "");
+      const pres = document.querySelectorAll("body pre");
+      for (const pre of pres) {
+        if (
+          pre.childNodes.length === 1 &&
+          pre.firstChild &&
+          pre.firstChild.nodeType === Node.TEXT_NODE
+        ) {
+          const tr = (pre.textContent || "").replace(/^\uFEFF/, "").trim();
+          if (tr.startsWith("{") || tr.startsWith("[")) {
+            bodyObserver.disconnect();
+            setup(pre.textContent || "");
+            return;
+          }
+        }
       }
     });
     bodyObserver.observe(document.documentElement, {
