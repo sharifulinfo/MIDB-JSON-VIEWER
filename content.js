@@ -276,6 +276,67 @@
     )}`;
   }
 
+  /** `/{index}?_id=` using the hit's `_index`, else the `_index` captured from the payload. */
+  function elasticsearchHitDocOpenUrl(hitObj, normalizedDocId) {
+    if (!normalizedDocId) return null;
+    const fromHit =
+      typeof hitObj._index === "string" && /^[\w.-]+$/.test(hitObj._index.trim())
+        ? hitObj._index.trim()
+        : null;
+    const fallback =
+      typeof midbElasticsearchIndex === "string" &&
+      /^[\w.-]+$/.test(midbElasticsearchIndex)
+        ? midbElasticsearchIndex
+        : null;
+    const idx = fromHit || fallback;
+    if (!idx) return null;
+    return `${originBase()}/${idx}?_id=${encodeURIComponent(normalizedDocId)}`;
+  }
+
+  /** True when `_index` names a MIDB prospect Elasticsearch index (`441_prospects`, …). */
+  function hitIndexLooksLikeProspects(hitObj) {
+    const fromHit =
+      typeof hitObj._index === "string" ? hitObj._index.trim().toLowerCase() : "";
+    if (fromHit) {
+      return (
+        /^[\w.-]+$/.test(fromHit) &&
+        (fromHit === "prospects" || fromHit.endsWith("_prospects"))
+      );
+    }
+    const global =
+      typeof midbElasticsearchIndex === "string"
+        ? midbElasticsearchIndex.trim().toLowerCase()
+        : "";
+    return (
+      global &&
+      /^[\w.-]+$/.test(global) &&
+      (global === "prospects" || global.endsWith("_prospects"))
+    );
+  }
+
+  /** Extra MIDB tabs (workflow / webhook / labeling) — used for `prospect_id` and for ES `_id` on `*_prospects` indexes. */
+  function prospectMidbJobLinks(normalizedProspectId) {
+    const qp = encodeURIComponent(normalizedProspectId);
+    const b = originBase();
+    return [
+      {
+        href: `${b}/workflow_jobs?prospect_id=${qp}`,
+        tooltip: "Workflow job — MIDB workflow_jobs for this prospect_id",
+        className: "midb-json-act-prospect-job midb-json-act-prospect-job-workflow",
+      },
+      {
+        href: `${b}/webhook_jobs?prospect_id=${qp}`,
+        tooltip: "Webhook job — MIDB webhook_jobs for this prospect_id",
+        className: "midb-json-act-prospect-job midb-json-act-prospect-job-webhook",
+      },
+      {
+        href: `${b}/labeling_logs?prospect_id=${qp}`,
+        tooltip: "Labeling job — MIDB labeling_logs for this prospect_id",
+        className: "midb-json-act-prospect-job midb-json-act-prospect-job-labeling",
+      },
+    ];
+  }
+
   function collectMidbFieldLinks(obj) {
     if (Array.isArray(obj)) {
       obj.forEach((item) => collectMidbFieldLinks(item));
@@ -290,13 +351,22 @@
           if (normalized) {
             if (key === "prospect_id") {
               href = hrefWsScopedEntity(v, obj, "prospects");
+              const filterHref = elasticsearchIndexFilterHref(key, normalized);
+              const payload = {
+                field: key,
+                copyText: normalized,
+                prospectJobLinks: prospectMidbJobLinks(normalized),
+              };
+              if (href) payload.href = href;
+              if (filterHref) payload.filterHref = filterHref;
+              registerMidbLinkTokens(normalized, payload);
             } else if (key === "mailbox_id") href = hrefWsScopedEntity(v, obj, "mailbox");
             else if (key === "workspace_id")
               href = `${originBase()}/ws_metadata?_id=${encodeURIComponent(normalized)}`;
             else if (key === "channel_id")
               href = `${originBase()}/channels?_id=${encodeURIComponent(normalized)}`;
 
-            if (href) {
+            if (href && key !== "prospect_id") {
               const filterHref = elasticsearchIndexFilterHref(key, normalized);
               const payload = { href, field: key, copyText: normalized };
               if (filterHref) payload.filterHref = filterHref;
@@ -304,7 +374,21 @@
             }
           }
 
-          if (!href && MIDB_EXTRA_COPY_FILTER_KEYS.has(key) && normalized) {
+          if (key === "_id" && normalized) {
+            const docUrl = elasticsearchHitDocOpenUrl(obj, normalized);
+            const payload = {
+              field: "_id",
+              copyText: normalized,
+            };
+            if (docUrl) {
+              payload.href = docUrl;
+              payload.filterHref = docUrl;
+            }
+            if (hitIndexLooksLikeProspects(obj)) {
+              payload.prospectJobLinks = prospectMidbJobLinks(normalized);
+            }
+            registerMidbLinkTokens(normalized, payload);
+          } else if (!href && MIDB_EXTRA_COPY_FILTER_KEYS.has(key) && normalized) {
             const filterHref = elasticsearchIndexFilterHref(key, normalized);
             const payload = { field: key, copyText: normalized };
             if (filterHref) payload.filterHref = filterHref;
@@ -501,6 +585,10 @@
     document.body.removeChild(ta);
   }
 
+  /** Shared “open in new tab” glyph for toolbar links */
+  const MIDB_EXTERNAL_LINK_PATH =
+    "M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7ZM14 3h7v7h2V3h-9v2Zm-1.83 11.83 1.41 1.41L19 6.41V10h2V3h-7v2h3.59Z";
+
   /** Fixed 14×14 SVGs — avoids emoji/font metrics jitter next to padded JSON strings. */
   function appendMidbToolbarSvg(parent, pathD, viewBox) {
     const vb = viewBox || "0 0 24 24";
@@ -522,7 +610,8 @@
     const acts = document.createElement("span");
     acts.className = "midb-json-actions";
 
-    const kindLabel = entry.field.replace(/_/g, " ");
+    const kindLabel =
+      entry.field === "_id" ? "document _id" : entry.field.replace(/_/g, " ");
     const copyLabel = `Copy ${kindLabel}`;
 
     const copyBtn = document.createElement("button");
@@ -555,7 +644,7 @@
       openA.setAttribute("aria-label", openLabel);
       appendMidbToolbarSvg(
         openA,
-        "M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7ZM14 3h7v7h2V3h-9v2Zm-1.83 11.83 1.41 1.41L19 6.41V10h2V3h-7v2h3.59Z",
+        MIDB_EXTERNAL_LINK_PATH,
       );
       acts.appendChild(openA);
     }
@@ -563,7 +652,10 @@
     const hasFilter = typeof entry.filterHref === "string" && entry.filterHref;
     if (hasFilter) {
       btnCount++;
-      const filterLabel = `Filter index by ${kindLabel}`;
+      const filterLabel =
+        entry.field === "_id"
+          ? "Filter this index by document _id"
+          : `Filter index by ${kindLabel}`;
       const filterA = document.createElement("a");
       filterA.className = "midb-json-act midb-json-act-filter";
       filterA.href = entry.filterHref;
@@ -574,6 +666,24 @@
         "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 10.5 5 15 7.01 15 9.5 12.99 14 10.5 14Z",
       );
       acts.appendChild(filterA);
+    }
+
+    const jobLinks = Array.isArray(entry.prospectJobLinks) ? entry.prospectJobLinks : [];
+    for (const job of jobLinks) {
+      if (job && typeof job.href === "string" && job.href) {
+        btnCount++;
+        const jobA = document.createElement("a");
+        jobA.className = `midb-json-act ${job.className || "midb-json-act-prospect-job"}`;
+        jobA.href = job.href;
+        const tip =
+          typeof job.tooltip === "string" && job.tooltip
+            ? job.tooltip
+            : "Open related MIDB page for this prospect";
+        jobA.title = tip;
+        jobA.setAttribute("aria-label", tip);
+        appendMidbToolbarSvg(jobA, MIDB_EXTERNAL_LINK_PATH);
+        acts.appendChild(jobA);
+      }
     }
 
     acts.classList.add(`midb-json-actions--count-${btnCount}`);
