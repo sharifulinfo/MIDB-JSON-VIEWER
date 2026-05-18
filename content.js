@@ -17,8 +17,36 @@
   // Raw token / alias → epoch ms (annotations built at inject time so relative stays fresh)
   const timestampMap = new Map();
 
-  // Known JSON string forms → { href, field } (see collectMidbFieldLinks)
+  // Known JSON string forms → { field, copyText, href?, filterHref? } (see collectMidbFieldLinks)
   const midbFieldLinkMap = new Map();
+
+  /** Elasticsearch `_index` for prospect filter URLs (captureElasticsearchIndex). */
+  let midbElasticsearchIndex = null;
+
+  /**
+   * Extra keys: copy + index filter only (no entity “open” link). Append more names here later.
+   * Matching is case-insensitive on JSON keys.
+   */
+  const MIDB_EXTRA_COPY_FILTER_FIELDS = [
+    "sent",
+    "seen",
+    "user_id",
+    "type",
+    "source",
+    "email_id",
+    "status",
+    "sycn_status",
+    "label_id",
+    "trigger_type",
+    "trigger_value",
+    "label_delay",
+    "workflow_id",
+    "webhook_id",
+  ];
+
+  const MIDB_EXTRA_COPY_FILTER_KEYS = new Set(
+    MIDB_EXTRA_COPY_FILTER_FIELDS.map((name) => name.toLowerCase()),
+  );
 
   // ── Timestamp helpers ────────────────────────────────────────────────────
 
@@ -173,8 +201,40 @@
     return `${location.protocol}//${location.host}`;
   }
 
+  function extractElasticsearchIndex(data) {
+    if (data === null || typeof data !== "object") return null;
+
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        const x = extractElasticsearchIndex(item);
+        if (x) return x;
+      }
+      return null;
+    }
+
+    if (typeof data._index === "string") {
+      const t = data._index.trim();
+      if (t) return t;
+    }
+
+    const hits = data.hits?.hits;
+    if (Array.isArray(hits)) {
+      for (const h of hits) {
+        if (h && typeof h === "object" && typeof h._index === "string" && h._index.trim())
+          return h._index.trim();
+      }
+    }
+
+    return null;
+  }
+
+  function captureElasticsearchIndex(data) {
+    midbElasticsearchIndex = extractElasticsearchIndex(data);
+  }
+
   function normalizeMidbLinkValue(v) {
     if (v == null) return null;
+    if (typeof v === "boolean") return v ? "true" : "false";
     if (typeof v === "number" && Number.isFinite(v)) return String(Math.trunc(v));
     if (typeof v === "string" && v.trim()) return v.trim();
     return null;
@@ -195,6 +255,27 @@
     midbFieldLinkMap.set(`'${id}'`, entry);
   }
 
+  /** `{origin}/{_index}?{field}=…` when `_index` was captured from the payload. */
+  const MIDB_ES_FILTER_FIELDS = new Set([
+    "prospect_id",
+    "mailbox_id",
+    "workspace_id",
+    "channel_id",
+    ...MIDB_EXTRA_COPY_FILTER_KEYS,
+  ]);
+
+  function elasticsearchIndexFilterHref(fieldKey, normalizedId) {
+    if (!MIDB_ES_FILTER_FIELDS.has(fieldKey)) return null;
+    if (
+      typeof midbElasticsearchIndex !== "string" ||
+      !/^[\w.-]+$/.test(midbElasticsearchIndex)
+    )
+      return null;
+    return `${originBase()}/${midbElasticsearchIndex}?${fieldKey}=${encodeURIComponent(
+      normalizedId,
+    )}`;
+  }
+
   function collectMidbFieldLinks(obj) {
     if (Array.isArray(obj)) {
       obj.forEach((item) => collectMidbFieldLinks(item));
@@ -204,16 +285,30 @@
         if (typeof k === "string") {
           const key = k.toLowerCase();
           const normalized = normalizeMidbLinkValue(v);
+
+          let href = null;
           if (normalized) {
-            let href = null;
-            if (key === "prospect_id") href = hrefWsScopedEntity(v, obj, "prospects");
-            else if (key === "mailbox_id") href = hrefWsScopedEntity(v, obj, "mailbox");
+            if (key === "prospect_id") {
+              href = hrefWsScopedEntity(v, obj, "prospects");
+            } else if (key === "mailbox_id") href = hrefWsScopedEntity(v, obj, "mailbox");
             else if (key === "workspace_id")
               href = `${originBase()}/ws_metadata?_id=${encodeURIComponent(normalized)}`;
             else if (key === "channel_id")
               href = `${originBase()}/channels?_id=${encodeURIComponent(normalized)}`;
 
-            if (href) registerMidbLinkTokens(normalized, { href, field: key });
+            if (href) {
+              const filterHref = elasticsearchIndexFilterHref(key, normalized);
+              const payload = { href, field: key, copyText: normalized };
+              if (filterHref) payload.filterHref = filterHref;
+              registerMidbLinkTokens(normalized, payload);
+            }
+          }
+
+          if (!href && MIDB_EXTRA_COPY_FILTER_KEYS.has(key) && normalized) {
+            const filterHref = elasticsearchIndexFilterHref(key, normalized);
+            const payload = { field: key, copyText: normalized };
+            if (filterHref) payload.filterHref = filterHref;
+            registerMidbLinkTokens(normalized, payload);
           }
         }
         collectMidbFieldLinks(v);
@@ -351,7 +446,7 @@
           }
           if (
             node.parentElement &&
-            node.parentElement.closest(".midb-json-link")
+            node.parentElement.closest(".midb-json-inline, a.midb-json-link")
           ) {
             return NodeFilter.FILTER_REJECT;
           }
@@ -382,15 +477,164 @@
     return null;
   }
 
+  function copyStringToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(text).catch(() =>
+        copyStringToClipboardExec(text),
+      );
+      return;
+    }
+    copyStringToClipboardExec(text);
+  }
+
+  function copyStringToClipboardExec(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+    } catch (_) {}
+    document.body.removeChild(ta);
+  }
+
+  /** Fixed 14×14 SVGs — avoids emoji/font metrics jitter next to padded JSON strings. */
+  function appendMidbToolbarSvg(parent, pathD, viewBox) {
+    const vb = viewBox || "0 0 24 24";
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", vb);
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("fill", "currentColor");
+    p.setAttribute("d", pathD);
+    svg.appendChild(p);
+    parent.appendChild(svg);
+  }
+
+  /** Copy + optional open link + optional index filter (`href` / `filterHref` omitted when not applicable). */
+  function midbFieldActionBar(entry) {
+    const acts = document.createElement("span");
+    acts.className = "midb-json-actions";
+
+    const kindLabel = entry.field.replace(/_/g, " ");
+    const copyLabel = `Copy ${kindLabel}`;
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "midb-json-act midb-json-act-copy";
+    copyBtn.title = copyLabel;
+    copyBtn.setAttribute("aria-label", copyLabel);
+    appendMidbToolbarSvg(
+      copyBtn,
+      "M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1Zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Zm0 16H8V7h11v14Z",
+    );
+    copyBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof entry.copyText === "string" && entry.copyText)
+        copyStringToClipboard(entry.copyText);
+    });
+
+    acts.appendChild(copyBtn);
+    let btnCount = 1;
+
+    const hasOpen = typeof entry.href === "string" && entry.href;
+    if (hasOpen) {
+      btnCount++;
+      const openLabel = `Open ${kindLabel}`;
+      const openA = document.createElement("a");
+      openA.className = "midb-json-act midb-json-act-open";
+      openA.href = entry.href;
+      openA.title = openLabel;
+      openA.setAttribute("aria-label", openLabel);
+      appendMidbToolbarSvg(
+        openA,
+        "M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7ZM14 3h7v7h2V3h-9v2Zm-1.83 11.83 1.41 1.41L19 6.41V10h2V3h-7v2h3.59Z",
+      );
+      acts.appendChild(openA);
+    }
+
+    const hasFilter = typeof entry.filterHref === "string" && entry.filterHref;
+    if (hasFilter) {
+      btnCount++;
+      const filterLabel = `Filter index by ${kindLabel}`;
+      const filterA = document.createElement("a");
+      filterA.className = "midb-json-act midb-json-act-filter";
+      filterA.href = entry.filterHref;
+      filterA.title = filterLabel;
+      filterA.setAttribute("aria-label", filterLabel);
+      appendMidbToolbarSvg(
+        filterA,
+        "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5Zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 10.5 5 15 7.01 15 9.5 12.99 14 10.5 14Z",
+      );
+      acts.appendChild(filterA);
+    }
+
+    acts.classList.add(`midb-json-actions--count-${btnCount}`);
+    return acts;
+  }
+
+  /**
+   * One text node `"id", …` split so `"` wrappers stay inside the syntax string span,
+   * and action icons become siblings AFTER that span (not inside quoted text).
+   */
+  function splitJsonQuotedScalarOneNode(text) {
+    const m = String(text).match(
+      /^(\s*)(["'`\u201c\u201d])((?:[^"'`\\\u201c\u201d]|\\.)*)(["'`\u201c\u201d])([\s\S]*)$/,
+    );
+    if (!m) return null;
+    return {
+      outerLead: m[1],
+      openQuote: m[2],
+      inner: m[3],
+      closeQuote: m[4],
+      afterQuotes: m[5],
+    };
+  }
+
+  /** Stable class/id string for JSON highlighters — `element.className` is not always a JS string (SVG etc.). */
+  function elementHaystack(el) {
+    if (!el) return "";
+    if (typeof el.className === "string") return el.className + " " + (el.id || "");
+    try {
+      if (el instanceof SVGElement && el.className && el.className.baseVal !== undefined)
+        return el.className.baseVal + " " + (el.id || "");
+    } catch (_) {}
+    const c = el.getAttribute("class") || el.getAttribute("className") || "";
+    return c + " " + (el.id || "");
+  }
+
+  /**
+   * First (innermost) ancestor that looks like a *value* JSON string wrapper.
+   * If class detection fails midb stays on immediate parent — glue wrap still lifts icons logically.
+   */
+  function innermostJsonStringHueWrapper(textNode) {
+    const RX =
+      /\bhljs-string\b|\bhljs-literal\b|\bhljs-addition\b|\bmonaco-token-string\b|StringLiteral|string-literal|jsonformatterstring|json-formatter-string|json-formatter-row-value|formatter-string|--json-|objectBox-string|StringItem|mtk\d+\b|string-value|ace_string|string\b/i;
+
+    let el = textNode.parentElement;
+    while (el && el !== document.documentElement) {
+      if (RX.test(elementHaystack(el))) return el;
+      el = el.parentElement;
+    }
+    return textNode.parentElement;
+  }
+
   function injectMidbFieldLinks() {
-    if (document.querySelector(".midb-json-link")) return;
+    if (document.querySelector(".midb-json-inline, a.midb-json-link")) return;
     if (midbFieldLinkMap.size === 0) return;
 
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const p = node.parentElement;
         if (!p) return NodeFilter.FILTER_REJECT;
-        if (p.closest(".midb-ts-comment, .midb-json-link"))
+        if (p.closest(".midb-ts-comment, .midb-json-inline, a.midb-json-link"))
           return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       },
@@ -406,17 +650,65 @@
     for (const { node, entry } of hits) {
       const parent = node.parentNode;
       if (!parent) continue;
-      if (node.parentElement && node.parentElement.closest(".midb-json-link")) continue;
+      if (node.parentElement && node.parentElement.closest(".midb-json-inline, a.midb-json-link"))
+        continue;
 
-      const a = document.createElement("a");
-      a.className = "midb-json-link";
-      a.setAttribute("data-midb-field", entry.field);
-      a.href = entry.href;
-      const label = `Open ${entry.field.replace(/_/g, " ")}`;
-      a.title = label;
-      a.setAttribute("aria-label", label);
-      a.textContent = node.textContent;
-      parent.replaceChild(a, node);
+      const showFieldToolbar = typeof entry.copyText === "string" && Boolean(entry.copyText);
+
+      if (showFieldToolbar) {
+        const replaceParent = parent;
+        const tintShell = innermostJsonStringHueWrapper(node);
+        const acts = midbFieldActionBar(entry);
+
+        const q = splitJsonQuotedScalarOneNode(node.textContent);
+        const parsedMatchesCopy =
+          q &&
+          typeof entry.copyText === "string" &&
+          entry.copyText === q.inner.trim();
+
+        if (parsedMatchesCopy) {
+          const frag = document.createDocumentFragment();
+          frag.appendChild(document.createTextNode(`${q.outerLead}${q.openQuote}`));
+          const valSpanEl = document.createElement("span");
+          valSpanEl.className = "midb-json-value";
+          valSpanEl.textContent = q.inner;
+          frag.appendChild(valSpanEl);
+          frag.appendChild(document.createTextNode(`${q.closeQuote}${q.afterQuotes}`));
+          replaceParent.replaceChild(frag, node);
+        } else {
+          const valFallback = document.createElement("span");
+          valFallback.className = "midb-json-value";
+          valFallback.textContent = node.textContent;
+          replaceParent.replaceChild(valFallback, node);
+        }
+
+        const glueParent = tintShell.parentNode;
+        const glue = document.createElement("span");
+        glue.className = "midb-json-inline";
+        glue.setAttribute("data-midb-field", entry.field);
+
+        if (glueParent) {
+          glueParent.insertBefore(glue, tintShell);
+          glue.appendChild(tintShell);
+          glue.appendChild(acts);
+        } else {
+          acts.classList.add("midb-json-actions-fallback");
+          tintShell.appendChild(acts);
+        }
+        continue;
+      }
+
+      if (typeof entry.href === "string" && entry.href) {
+        const a = document.createElement("a");
+        a.className = "midb-json-link";
+        a.setAttribute("data-midb-field", entry.field);
+        a.href = entry.href;
+        const label = `Open ${entry.field.replace(/_/g, " ")}`;
+        a.title = label;
+        a.setAttribute("aria-label", label);
+        a.textContent = node.textContent;
+        parent.replaceChild(a, node);
+      }
     }
   }
 
@@ -464,6 +756,7 @@
     if (!data) return;
 
     collectTimestamps(data);
+    captureElasticsearchIndex(data);
     collectMidbFieldLinks(data);
     if (timestampMap.size === 0 && midbFieldLinkMap.size === 0) return;
 
