@@ -19,3 +19,8 @@
 .midb-ts-bdt {
   color: #0e782e !important; /* soft cyan — change freely */
 }
+
+/* Relative “time ago” — readable accent */
+.midb-ts-relative {
+  color: #c9a227 !important;
+}
