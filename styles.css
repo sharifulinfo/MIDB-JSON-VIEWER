@@ -25,11 +25,12 @@
   color: #c9a227 !important;
 }
 
-/* Linked prospect_id values */
-a.midb-prospect-link {
-  color: #6cb6ff !important;
-  text-decoration: underline !important;
+/* Linked JSON ids — underline on hover only (prospect_id, mailbox_id, …) */
+a.midb-json-link {
+  color: inherit !important;
+  text-decoration: none !important;
+  cursor: pointer;
 }
-a.midb-prospect-link:hover {
-  color: #96ccff !important;
+a.midb-json-link:hover {
+  text-decoration: underline !important;
 }

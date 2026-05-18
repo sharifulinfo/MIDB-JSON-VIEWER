@@ -17,8 +17,8 @@
   // Raw token / alias → epoch ms (annotations built at inject time so relative stays fresh)
   const timestampMap = new Map();
 
-  // prospect display token → detail URL (see collectProspectLinks)
-  const prospectLinkMap = new Map();
+  // Known JSON string forms → { href, field } (see collectMidbFieldLinks)
+  const midbFieldLinkMap = new Map();
 
   // ── Timestamp helpers ────────────────────────────────────────────────────
 
@@ -160,8 +160,8 @@
     }
   }
 
-  function resolveWorkspaceForProspect(prospectId, parentObj) {
-    const m = prospectId.match(/^(\d+)_/);
+  function resolveWorkspaceFromIdAndParent(entityId, parentObj) {
+    const m = String(entityId).match(/^(\d+)_/);
     if (m) return m[1];
     const w = parentObj?.workspace_id;
     if (typeof w === "number" && Number.isFinite(w)) return String(Math.trunc(w));
@@ -169,33 +169,54 @@
     return null;
   }
 
-  function registerProspectLinkTokens(prospectId, href) {
-    const id = prospectId.trim();
-    prospectLinkMap.set(id, href);
-    prospectLinkMap.set(`"${id}"`, href);
-    prospectLinkMap.set(`'${id}'`, href);
+  function originBase() {
+    return `${location.protocol}//${location.host}`;
   }
 
-  function collectProspectLinks(obj) {
+  function normalizeMidbLinkValue(v) {
+    if (v == null) return null;
+    if (typeof v === "number" && Number.isFinite(v)) return String(Math.trunc(v));
+    if (typeof v === "string" && v.trim()) return v.trim();
+    return null;
+  }
+
+  function hrefWsScopedEntity(entityId, parentObj, pathSegment) {
+    const id = normalizeMidbLinkValue(entityId);
+    if (!id) return null;
+    const ws = resolveWorkspaceFromIdAndParent(id, parentObj);
+    if (!ws) return null;
+    return `${originBase()}/${ws}_${pathSegment}?_id=${encodeURIComponent(id)}`;
+  }
+
+  function registerMidbLinkTokens(displayValue, entry) {
+    const id = String(displayValue).trim();
+    midbFieldLinkMap.set(id, entry);
+    midbFieldLinkMap.set(`"${id}"`, entry);
+    midbFieldLinkMap.set(`'${id}'`, entry);
+  }
+
+  function collectMidbFieldLinks(obj) {
     if (Array.isArray(obj)) {
-      obj.forEach((item) => collectProspectLinks(item));
+      obj.forEach((item) => collectMidbFieldLinks(item));
     } else if (obj !== null && typeof obj === "object") {
       for (const k of Object.keys(obj)) {
         const v = obj[k];
-        if (
-          typeof k === "string" &&
-          k.toLowerCase() === "prospect_id" &&
-          typeof v === "string" &&
-          v.trim()
-        ) {
-          const id = v.trim();
-          const ws = resolveWorkspaceForProspect(id, obj);
-          if (ws) {
-            const href = `${location.protocol}//${location.host}/${ws}_prospects?_id=${encodeURIComponent(id)}`;
-            registerProspectLinkTokens(id, href);
+        if (typeof k === "string") {
+          const key = k.toLowerCase();
+          const normalized = normalizeMidbLinkValue(v);
+          if (normalized) {
+            let href = null;
+            if (key === "prospect_id") href = hrefWsScopedEntity(v, obj, "prospects");
+            else if (key === "mailbox_id") href = hrefWsScopedEntity(v, obj, "mailbox");
+            else if (key === "workspace_id")
+              href = `${originBase()}/ws_metadata?_id=${encodeURIComponent(normalized)}`;
+            else if (key === "channel_id")
+              href = `${originBase()}/channels?_id=${encodeURIComponent(normalized)}`;
+
+            if (href) registerMidbLinkTokens(normalized, { href, field: key });
           }
         }
-        collectProspectLinks(v);
+        collectMidbFieldLinks(v);
       }
     }
   }
@@ -330,7 +351,7 @@
           }
           if (
             node.parentElement &&
-            node.parentElement.closest(".midb-prospect-link")
+            node.parentElement.closest(".midb-json-link")
           ) {
             return NodeFilter.FILTER_REJECT;
           }
@@ -353,23 +374,23 @@
     }
   }
 
-  function hrefForProspectDomText(raw) {
+  function midbLinkEntryForDomText(raw) {
     const trimmed = String(raw || "").trim().replace(/,$/, "");
-    if (prospectLinkMap.has(trimmed)) return prospectLinkMap.get(trimmed);
+    if (midbFieldLinkMap.has(trimmed)) return midbFieldLinkMap.get(trimmed);
     const stripped = trimmed.replace(/^["']|["']$/g, "").trim().replace(/,$/, "");
-    if (prospectLinkMap.has(stripped)) return prospectLinkMap.get(stripped);
+    if (midbFieldLinkMap.has(stripped)) return midbFieldLinkMap.get(stripped);
     return null;
   }
 
-  function injectProspectLinks() {
-    if (document.querySelector(".midb-prospect-link")) return;
-    if (prospectLinkMap.size === 0) return;
+  function injectMidbFieldLinks() {
+    if (document.querySelector(".midb-json-link")) return;
+    if (midbFieldLinkMap.size === 0) return;
 
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const p = node.parentElement;
         if (!p) return NodeFilter.FILTER_REJECT;
-        if (p.closest(".midb-ts-comment, .midb-prospect-link"))
+        if (p.closest(".midb-ts-comment, .midb-json-link"))
           return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       },
@@ -378,16 +399,22 @@
     const hits = [];
     let node;
     while ((node = walker.nextNode())) {
-      const href = hrefForProspectDomText(node.textContent);
-      if (href) hits.push({ node, href });
+      const entry = midbLinkEntryForDomText(node.textContent);
+      if (entry) hits.push({ node, entry });
     }
 
-    for (const { node, href } of hits) {
+    for (const { node, entry } of hits) {
       const parent = node.parentNode;
       if (!parent) continue;
+      if (node.parentElement && node.parentElement.closest(".midb-json-link")) continue;
+
       const a = document.createElement("a");
-      a.className = "midb-prospect-link";
-      a.href = href;
+      a.className = "midb-json-link";
+      a.setAttribute("data-midb-field", entry.field);
+      a.href = entry.href;
+      const label = `Open ${entry.field.replace(/_/g, " ")}`;
+      a.title = label;
+      a.setAttribute("aria-label", label);
       a.textContent = node.textContent;
       parent.replaceChild(a, node);
     }
@@ -437,14 +464,14 @@
     if (!data) return;
 
     collectTimestamps(data);
-    collectProspectLinks(data);
-    if (timestampMap.size === 0 && prospectLinkMap.size === 0) return;
+    collectMidbFieldLinks(data);
+    if (timestampMap.size === 0 && midbFieldLinkMap.size === 0) return;
 
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
-        injectProspectLinks();
+        injectMidbFieldLinks();
         injectAnnotations();
       }, 400);
     });
@@ -454,7 +481,7 @@
       subtree: true,
     });
 
-    injectProspectLinks();
+    injectMidbFieldLinks();
     injectAnnotations();
   }
 
