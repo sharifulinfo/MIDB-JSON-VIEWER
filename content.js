@@ -39,6 +39,9 @@
     "label_id",
     "trigger_type",
     "trigger_value",
+    "event_action",
+    "event_type",
+    "status_code",
     "label_delay",
     "workflow_id",
     "webhook_id",
@@ -47,6 +50,23 @@
   const MIDB_EXTRA_COPY_FILTER_KEYS = new Set(
     MIDB_EXTRA_COPY_FILTER_FIELDS.map((name) => name.toLowerCase()),
   );
+
+  /** ES `_shards.*` counters share values like `0`/`1` with the rest of the doc — never register toolbars there. */
+  const MIDB_ES_TOPLEVEL_META_KEYS = new Set(["timed_out", "took"]);
+
+  /** Small integers as `prospect_id`-style filters are rare; allow these keys to keep copy/filter. */
+  const MIDB_EXTRA_ALLOW_SHORT_INTEGER = new Set([
+    "status",
+    "type",
+    "label_id",
+    "workflow_id",
+    "webhook_id",
+    "user_id",
+  ]);
+
+  function isAmbiguousShortIntegerToolbarValue(normalized) {
+    return /^\d{1,3}$/.test(String(normalized).trim());
+  }
 
   // ── Timestamp helpers ────────────────────────────────────────────────────
 
@@ -380,65 +400,81 @@
     return jobs;
   }
 
-  function collectMidbFieldLinks(obj) {
+  function collectMidbFieldLinks(obj, parentKeyLower) {
+    const parent = parentKeyLower == null ? null : String(parentKeyLower).toLowerCase();
+
     if (Array.isArray(obj)) {
-      obj.forEach((item) => collectMidbFieldLinks(item));
-    } else if (obj !== null && typeof obj === "object") {
-      for (const k of Object.keys(obj)) {
-        const v = obj[k];
-        if (typeof k === "string") {
-          const key = k.toLowerCase();
-          const normalized = normalizeMidbLinkValue(v);
+      obj.forEach((item) => collectMidbFieldLinks(item, parent));
+      return;
+    }
+    if (obj === null || typeof obj !== "object") return;
 
-          let href = null;
-          if (normalized) {
-            if (key === "prospect_id") {
-              href = hrefWsScopedEntity(v, obj, "prospects");
-              const filterHref = elasticsearchIndexFilterHref(key, normalized);
-              const payload = {
-                field: key,
-                copyText: normalized,
-                prospectJobLinks: prospectMidbJobLinks(normalized, obj),
-              };
-              if (href) payload.href = href;
-              if (filterHref) payload.filterHref = filterHref;
-              registerMidbLinkTokens(normalized, payload);
-            } else if (key === "mailbox_id") href = hrefWsScopedEntity(v, obj, "mailbox");
-            else if (key === "workspace_id")
-              href = `${originBase()}/ws_metadata?_id=${encodeURIComponent(normalized)}`;
-            else if (key === "channel_id")
-              href = `${originBase()}/channels?_id=${encodeURIComponent(normalized)}`;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      const key = typeof k === "string" ? k.toLowerCase() : null;
 
-            if (href && key !== "prospect_id") {
-              const filterHref = elasticsearchIndexFilterHref(key, normalized);
-              const payload = { href, field: key, copyText: normalized };
-              if (filterHref) payload.filterHref = filterHref;
-              registerMidbLinkTokens(normalized, payload);
-            }
-          }
+      if (v !== null && typeof v === "object") {
+        collectMidbFieldLinks(v, key);
+      }
 
-          if (key === "_id" && normalized) {
-            const docUrl = elasticsearchHitDocOpenUrl(obj, normalized);
-            const payload = {
-              field: "_id",
-              copyText: normalized,
-            };
-            if (docUrl) {
-              payload.href = docUrl;
-              payload.filterHref = docUrl;
-            }
-            if (hitIndexLooksLikeProspects(obj)) {
-              payload.prospectJobLinks = prospectMidbJobLinks(normalized, obj);
-            }
-            registerMidbLinkTokens(normalized, payload);
-          } else if (!href && MIDB_EXTRA_COPY_FILTER_KEYS.has(key) && normalized) {
-            const filterHref = elasticsearchIndexFilterHref(key, normalized);
-            const payload = { field: key, copyText: normalized };
-            if (filterHref) payload.filterHref = filterHref;
-            registerMidbLinkTokens(normalized, payload);
-          }
+      if (typeof k !== "string") continue;
+      if (parent === "_shards") continue;
+
+      const normalized = normalizeMidbLinkValue(v);
+
+      let href = null;
+      if (normalized) {
+        if (key === "prospect_id") {
+          href = hrefWsScopedEntity(v, obj, "prospects");
+          const filterHref = elasticsearchIndexFilterHref(key, normalized);
+          const payload = {
+            field: key,
+            copyText: normalized,
+            prospectJobLinks: prospectMidbJobLinks(normalized, obj),
+          };
+          if (href) payload.href = href;
+          if (filterHref) payload.filterHref = filterHref;
+          registerMidbLinkTokens(normalized, payload);
+        } else if (key === "mailbox_id") href = hrefWsScopedEntity(v, obj, "mailbox");
+        else if (key === "workspace_id")
+          href = `${originBase()}/ws_metadata?_id=${encodeURIComponent(normalized)}`;
+        else if (key === "channel_id")
+          href = `${originBase()}/channels?_id=${encodeURIComponent(normalized)}`;
+
+        if (href && key !== "prospect_id") {
+          const filterHref = elasticsearchIndexFilterHref(key, normalized);
+          const payload = { href, field: key, copyText: normalized };
+          if (filterHref) payload.filterHref = filterHref;
+          registerMidbLinkTokens(normalized, payload);
         }
-        collectMidbFieldLinks(v);
+      }
+
+      if (key === "_id" && normalized) {
+        const docUrl = elasticsearchHitDocOpenUrl(obj, normalized);
+        const payload = {
+          field: "_id",
+          copyText: normalized,
+        };
+        if (docUrl) {
+          payload.href = docUrl;
+          payload.filterHref = docUrl;
+        }
+        if (hitIndexLooksLikeProspects(obj)) {
+          payload.prospectJobLinks = prospectMidbJobLinks(normalized, obj);
+        }
+        registerMidbLinkTokens(normalized, payload);
+      } else if (
+        !href &&
+        MIDB_EXTRA_COPY_FILTER_KEYS.has(key) &&
+        normalized &&
+        !MIDB_ES_TOPLEVEL_META_KEYS.has(key) &&
+        (!isAmbiguousShortIntegerToolbarValue(normalized) ||
+          MIDB_EXTRA_ALLOW_SHORT_INTEGER.has(key))
+      ) {
+        const filterHref = elasticsearchIndexFilterHref(key, normalized);
+        const payload = { field: key, copyText: normalized };
+        if (filterHref) payload.filterHref = filterHref;
+        registerMidbLinkTokens(normalized, payload);
       }
     }
   }
@@ -932,7 +968,7 @@
 
     collectTimestamps(data);
     captureElasticsearchIndex(data);
-    collectMidbFieldLinks(data);
+    collectMidbFieldLinks(data, null);
     if (timestampMap.size === 0 && midbFieldLinkMap.size === 0) return;
 
     let debounceTimer = null;
