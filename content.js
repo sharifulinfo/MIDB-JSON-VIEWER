@@ -314,27 +314,70 @@
     );
   }
 
-  /** Extra MIDB tabs (workflow / webhook / labeling) — used for `prospect_id` and for ES `_id` on `*_prospects` indexes. */
-  function prospectMidbJobLinks(normalizedProspectId) {
+  /** Prospect toolbar icons (distinct shapes for quick scanning). Single path or `{ paths: [...] }` for composites. */
+  const MIDB_TOOLBAR_ICON_WORKFLOW = {
+    path: "M22 11V3h-7v3H9V3H2v8h7V8h6v3h7V8h-2V5h2v3h2V5h2v6h-6V8H9v8h7v-3h12v3h-2v-3h-2v6h2v-4h2v4h2V11h-8z",
+  };
+
+  const MIDB_TOOLBAR_ICON_WEBHOOK = {
+    paths: [
+      {
+        d: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1z",
+      },
+      {
+        d: "M8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z",
+      },
+    ],
+  };
+
+  const MIDB_TOOLBAR_ICON_LABEL = {
+    path: "M17.63 5.84C17.27 5.33 16.67 5 16 5L5 5.01C3.9 5.01 3 5.9 3 7v10c0 1.1.9 1.99 2 1.99L16 18c.67 0 1.27-.33 1.63-.84L22 12l-4.37-6.16z",
+  };
+
+  const MIDB_TOOLBAR_ICON_MAIL = {
+    path: "M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4-8 6L4 8.01V6l8 5 8-5v2z",
+  };
+
+  /**
+   * Extra MIDB tabs (workflow / webhook / labeling / mailbox messages) —
+   * for `prospect_id` and for ES `_id` on prospect indexes. `parentObj` resolves `{ws}_mailbox`.
+   */
+  function prospectMidbJobLinks(normalizedProspectId, parentObj) {
     const qp = encodeURIComponent(normalizedProspectId);
     const b = originBase();
-    return [
+    const ws = resolveWorkspaceFromIdAndParent(normalizedProspectId, parentObj);
+
+    const jobs = [
       {
         href: `${b}/workflow_jobs?prospect_id=${qp}`,
-        tooltip: "Workflow job — MIDB workflow_jobs for this prospect_id",
+        tooltip: "Workflow jobs — MIDB workflow_jobs for this prospect_id",
         className: "midb-json-act-prospect-job midb-json-act-prospect-job-workflow",
+        icon: MIDB_TOOLBAR_ICON_WORKFLOW,
       },
       {
         href: `${b}/webhook_jobs?prospect_id=${qp}`,
-        tooltip: "Webhook job — MIDB webhook_jobs for this prospect_id",
+        tooltip: "Webhook jobs — MIDB webhook_jobs for this prospect_id",
         className: "midb-json-act-prospect-job midb-json-act-prospect-job-webhook",
+        icon: MIDB_TOOLBAR_ICON_WEBHOOK,
       },
       {
         href: `${b}/labeling_logs?prospect_id=${qp}`,
-        tooltip: "Labeling job — MIDB labeling_logs for this prospect_id",
+        tooltip: "Labeling logs — MIDB labeling_logs for this prospect_id",
         className: "midb-json-act-prospect-job midb-json-act-prospect-job-labeling",
+        icon: MIDB_TOOLBAR_ICON_LABEL,
       },
     ];
+
+    if (ws) {
+      jobs.push({
+        href: `${b}/${ws}_mailbox?prospect_id=${qp}`,
+        tooltip: "Messages — MIDB mailbox filtered by this prospect_id",
+        className: "midb-json-act-prospect-job midb-json-act-prospect-job-mailbox",
+        icon: MIDB_TOOLBAR_ICON_MAIL,
+      });
+    }
+
+    return jobs;
   }
 
   function collectMidbFieldLinks(obj) {
@@ -355,7 +398,7 @@
               const payload = {
                 field: key,
                 copyText: normalized,
-                prospectJobLinks: prospectMidbJobLinks(normalized),
+                prospectJobLinks: prospectMidbJobLinks(normalized, obj),
               };
               if (href) payload.href = href;
               if (filterHref) payload.filterHref = filterHref;
@@ -385,7 +428,7 @@
               payload.filterHref = docUrl;
             }
             if (hitIndexLooksLikeProspects(obj)) {
-              payload.prospectJobLinks = prospectMidbJobLinks(normalized);
+              payload.prospectJobLinks = prospectMidbJobLinks(normalized, obj);
             }
             registerMidbLinkTokens(normalized, payload);
           } else if (!href && MIDB_EXTRA_COPY_FILTER_KEYS.has(key) && normalized) {
@@ -589,20 +632,41 @@
   const MIDB_EXTERNAL_LINK_PATH =
     "M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7ZM14 3h7v7h2V3h-9v2Zm-1.83 11.83 1.41 1.41L19 6.41V10h2V3h-7v2h3.59Z";
 
-  /** Fixed 14×14 SVGs — avoids emoji/font metrics jitter next to padded JSON strings. */
-  function appendMidbToolbarSvg(parent, pathD, viewBox) {
-    const vb = viewBox || "0 0 24 24";
+  /**
+   * 14×14 toolbar glyph — `{ path }` or `{ paths: [{ d }] }`; optional `viewBox`.
+   */
+  function appendMidbToolbarIcon(parent, iconSpec, viewBoxOverride) {
+    const spec =
+      typeof iconSpec === "string"
+        ? { path: iconSpec }
+        : iconSpec && typeof iconSpec === "object"
+          ? iconSpec
+          : { path: "" };
+    const vb = viewBoxOverride || spec.viewBox || "0 0 24 24";
+    const parts = Array.isArray(spec.paths)
+      ? spec.paths
+      : spec.path
+        ? [{ d: spec.path }]
+        : [];
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", vb);
     svg.setAttribute("width", "14");
     svg.setAttribute("height", "14");
     svg.setAttribute("aria-hidden", "true");
     svg.setAttribute("focusable", "false");
-    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    p.setAttribute("fill", "currentColor");
-    p.setAttribute("d", pathD);
-    svg.appendChild(p);
+    for (const item of parts) {
+      if (!item || !item.d) continue;
+      const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      p.setAttribute("d", item.d);
+      p.setAttribute("fill", item.fill != null ? item.fill : "currentColor");
+      svg.appendChild(p);
+    }
     parent.appendChild(svg);
+  }
+
+  /** Fixed 14×14 SVGs — avoids emoji/font metrics jitter next to padded JSON strings. */
+  function appendMidbToolbarSvg(parent, pathD, viewBox) {
+    appendMidbToolbarIcon(parent, { path: pathD }, viewBox);
   }
 
   /** Copy + optional open link + optional index filter (`href` / `filterHref` omitted when not applicable). */
@@ -681,7 +745,8 @@
             : "Open related MIDB page for this prospect";
         jobA.title = tip;
         jobA.setAttribute("aria-label", tip);
-        appendMidbToolbarSvg(jobA, MIDB_EXTERNAL_LINK_PATH);
+        if (job.icon) appendMidbToolbarIcon(jobA, job.icon);
+        else appendMidbToolbarSvg(jobA, MIDB_EXTERNAL_LINK_PATH);
         acts.appendChild(jobA);
       }
     }

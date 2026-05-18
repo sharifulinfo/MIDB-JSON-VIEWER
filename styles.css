@@ -78,6 +78,10 @@ a.midb-json-link:hover {
   min-width: calc(22px * 6 + 20px);
 }
 
+.midb-json-actions--count-7 {
+  min-width: calc(22px * 7 + 24px);
+}
+
 /* No hover fade — keeps layout steady next to trimmed / padded strings */
 
 .midb-json-actions .midb-json-act {
