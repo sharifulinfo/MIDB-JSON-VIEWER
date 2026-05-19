@@ -268,11 +268,96 @@
     return `${originBase()}/${ws}_${pathSegment}?_id=${encodeURIComponent(id)}`;
   }
 
+  function mergeMidbToolbarEntries(prev, next) {
+    if (!prev) return next;
+    if (!prev.kind || prev.kind !== "midb-multi-toolbar") {
+      if (prev.field === next.field) return next;
+      return {
+        kind: "midb-multi-toolbar",
+        byField: { [prev.field]: prev, [next.field]: next },
+      };
+    }
+    prev.byField[next.field] = next;
+    return prev;
+  }
+
+  /** Pick `_id`- vs `prospect_id`-scoped payloads when literals collide across fields. */
+  function inferDomToolbarFieldNearValue(textNode) {
+    if (!textNode || textNode.nodeType !== Node.TEXT_NODE) return null;
+
+    let ctx = "";
+    let walk = textNode.previousSibling;
+    for (let i = 0; walk && i < 48 && ctx.length < 720; walk = walk.previousSibling, i++) {
+      const frag =
+        walk.nodeType === Node.TEXT_NODE
+          ? walk.textContent
+          : walk.nodeType === Node.ELEMENT_NODE
+            ? walk.textContent || ""
+            : "";
+      ctx = frag + ctx;
+    }
+
+    walk = textNode.parentElement;
+    for (let d = 0; walk && d < 10; walk = walk.parentElement, d++) {
+      let sib = walk.previousSibling;
+      for (let j = 0; sib && j < 16 && ctx.length < 900; sib = sib.previousSibling, j++) {
+        const frag =
+          sib.nodeType === Node.TEXT_NODE
+            ? sib.textContent
+            : sib.nodeType === Node.ELEMENT_NODE
+              ? sib.textContent || ""
+              : "";
+        ctx = frag + ctx;
+      }
+      if (ctx.length > 900) break;
+    }
+
+    const tail = ctx.slice(-520);
+    let bestField = null;
+    let bestPos = -1;
+    function note(field, rx) {
+      let m;
+      rx.lastIndex = 0;
+      while ((m = rx.exec(tail)) !== null) {
+        const at = typeof m.index === "number" ? m.index : 0;
+        if (at >= bestPos) {
+          bestPos = at;
+          bestField = field;
+        }
+      }
+    }
+
+    note("_id", /(?:^|[{\s,[,:])"_id"\s*:/g);
+    note("_id", /(?:^|[{\s,[,:])'_id'\s*:/g);
+    note("prospect_id", /(?:^|[{\s,[,:])"prospect_id"\s*:/g);
+    note("prospect_id", /(?:^|[{\s,[,:])'prospect_id'\s*:/g);
+
+    return bestField;
+  }
+
   function registerMidbLinkTokens(displayValue, entry) {
     const id = String(displayValue).trim();
-    midbFieldLinkMap.set(id, entry);
-    midbFieldLinkMap.set(`"${id}"`, entry);
-    midbFieldLinkMap.set(`'${id}'`, entry);
+    const merged = mergeMidbToolbarEntries(midbFieldLinkMap.get(id), entry);
+    midbFieldLinkMap.set(id, merged);
+    midbFieldLinkMap.set(`"${id}"`, merged);
+    midbFieldLinkMap.set(`'${id}'`, merged);
+  }
+
+  function lookupMidbLinkEntry(raw) {
+    const trimmed = String(raw || "").trim().replace(/,$/, "");
+    if (midbFieldLinkMap.has(trimmed)) return midbFieldLinkMap.get(trimmed);
+    const stripped = trimmed.replace(/^["']|["']$/g, "").trim().replace(/,$/, "");
+    if (midbFieldLinkMap.has(stripped)) return midbFieldLinkMap.get(stripped);
+    return null;
+  }
+
+  function resolveMidbToolbarEntry(raw, valueTextNode) {
+    const entry = lookupMidbLinkEntry(raw);
+    if (!entry || !entry.kind || entry.kind !== "midb-multi-toolbar") return entry;
+    const hinted = inferDomToolbarFieldNearValue(valueTextNode);
+    if (hinted && entry.byField[hinted]) return entry.byField[hinted];
+    if (entry.byField._id) return entry.byField._id;
+    return entry.byField.prospect_id || Object.values(entry.byField)[0] || null;
   }
 
   /** `{origin}/{_index}?{field}=…` when `_index` was captured from the payload. */
@@ -633,11 +718,7 @@
   }
 
   function midbLinkEntryForDomText(raw) {
-    const trimmed = String(raw || "").trim().replace(/,$/, "");
-    if (midbFieldLinkMap.has(trimmed)) return midbFieldLinkMap.get(trimmed);
-    const stripped = trimmed.replace(/^["']|["']$/g, "").trim().replace(/,$/, "");
-    if (midbFieldLinkMap.has(stripped)) return midbFieldLinkMap.get(stripped);
-    return null;
+    return lookupMidbLinkEntry(raw);
   }
 
   function copyStringToClipboard(text) {
@@ -854,7 +935,7 @@
     const hits = [];
     let node;
     while ((node = walker.nextNode())) {
-      const entry = midbLinkEntryForDomText(node.textContent);
+      const entry = resolveMidbToolbarEntry(node.textContent, node);
       if (entry) hits.push({ node, entry });
     }
 
