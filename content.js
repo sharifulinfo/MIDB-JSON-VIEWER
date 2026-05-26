@@ -482,6 +482,20 @@
       });
     }
 
+    jobs.push({
+      href: `https://app.masterinbox.com/inbox/all/search/${qp}`,
+      tooltip: "MasterInbox Thread URL for this prospect_id",
+      className: "midb-json-act-prospect-job midb-json-act-prospect-job-prospects",
+      icon: MIDB_TOOLBAR_ICON_WEBHOOK,
+    });
+
+    jobs.push({
+      href: `http://localhost:5173/inbox/all/search/${qp}`,
+      tooltip: "Local Thread URL for this prospect_id",
+      className: "midb-json-act-prospect-job midb-json-act-prospect-job-prospects",
+      icon: MIDB_TOOLBAR_ICON_WEBHOOK,
+    });
+
     return jobs;
   }
 
